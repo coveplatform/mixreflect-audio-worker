@@ -5,3 +5,6 @@ numpy>=1.24
 soundfile>=0.12
 mutagen>=1.46
 yt-dlp>=2024.1.0
+# Hosted GPU stem separation for deep reads (no torch needed locally). Inert
+# unless REPLICATE_API_TOKEN is set.
+replicate>=0.34.0

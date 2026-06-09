@@ -30,9 +30,79 @@ import os as _os
 # rough per-stem energy, so the faster model is usually fine. Override via env.
 MODEL_NAME = _os.environ.get('DJMIX_DEMUCS_MODEL', 'htdemucs')
 
+# Replicate hosted Demucs — lets a CPU-only box (e.g. Render) get GPU stem
+# separation without torch/demucs installed locally. Set REPLICATE_API_TOKEN to
+# enable; pin the model+version with REPLICATE_DEMUCS_MODEL. structure_from_stems
+# (pure numpy) still runs locally on the returned stems.
+REPLICATE_DEMUCS_MODEL = _os.environ.get(
+    'REPLICATE_DEMUCS_MODEL',
+    'cjwbw/demucs:25a173108cff36ef9f80f854c162d01df9e6528be175794b81158fa03836d953',
+)
+
+
+def _replicate_enabled():
+    return bool(_os.environ.get('REPLICATE_API_TOKEN'))
+
 
 def available():
-    return HAVE_DEMUCS
+    """Stems can run if local demucs is installed OR a Replicate token is set."""
+    return HAVE_DEMUCS or _replicate_enabled()
+
+
+def _separate_replicate(path):
+    """Separate via Replicate's hosted Demucs. Returns ({drums,bass,vocals,other:
+    float32}, sr) or None. No torch needed — the GPU work runs on Replicate; we
+    just download the stems and read them with soundfile."""
+    try:
+        import replicate  # noqa: PLC0415
+        import urllib.request  # noqa: PLC0415
+        import tempfile  # noqa: PLC0415
+    except Exception as e:  # noqa: BLE001
+        print(f'  replicate import failed: {e}', flush=True)
+        return None
+    try:
+        with open(path, 'rb') as fh:
+            out = replicate.run(REPLICATE_DEMUCS_MODEL, input={'audio': fh})
+    except Exception as e:  # noqa: BLE001
+        print(f'  replicate demucs failed: {e}', flush=True)
+        return None
+
+    # Output is a map of stem-name -> URL (FileOutput in newer clients). Normalise
+    # to {name: url}. Accept a few key spellings demucs variants use.
+    def _url(v):
+        return v.url if hasattr(v, 'url') else (v if isinstance(v, str) else None)
+
+    urls = {}
+    if isinstance(out, dict):
+        for name in ('drums', 'bass', 'vocals', 'other'):
+            for k in (name, f'{name}.mp3', f'{name}.wav'):
+                if k in out and _url(out[k]):
+                    urls[name] = _url(out[k]); break
+    if not urls:
+        print(f'  replicate demucs: unexpected output shape {type(out)}', flush=True)
+        return None
+
+    tmp = tempfile.mkdtemp(prefix='djmix-stems-')
+    sigs = {}
+    sr_common = None
+    try:
+        for name, url in urls.items():
+            dst = _os.path.join(tmp, f'{name}.wav')
+            urllib.request.urlretrieve(url, dst)
+            data, sr = sf.read(dst, always_2d=True, dtype='float32')
+            sigs[name] = data.mean(axis=1).astype(np.float32)  # to mono
+            sr_common = sr_common or sr
+        # demucs stems share a sample rate; align lengths defensively.
+        if sigs:
+            n = min(len(s) for s in sigs.values())
+            sigs = {k: v[:n] for k, v in sigs.items()}
+            return sigs, int(sr_common)
+    except Exception as e:  # noqa: BLE001
+        print(f'  replicate stem download failed: {e}', flush=True)
+    finally:
+        import shutil  # noqa: PLC0415
+        shutil.rmtree(tmp, ignore_errors=True)
+    return None
 
 
 def _pick_device():
@@ -76,8 +146,13 @@ def _model():
 
 
 def separate(path):
-    """Split into mono stems. Returns ({drums,bass,vocals,other: float32}, sr) or None."""
+    """Split into mono stems. Returns ({drums,bass,vocals,other: float32}, sr) or None.
+
+    Prefers a local demucs install (no network); falls back to Replicate's hosted
+    GPU Demucs when REPLICATE_API_TOKEN is set and torch isn't installed."""
     if not HAVE_DEMUCS:
+        if _replicate_enabled():
+            return _separate_replicate(path)
         return None
     try:
         m = _model()

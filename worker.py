@@ -303,6 +303,30 @@ def _sections_summary(structure: dict | None) -> list:
     ]
 
 
+def _mean(arr):
+    return round(sum(arr) / len(arr), 3) if arr else None
+
+
+def _acoustic_fingerprint(rec: dict, spectral: dict | None, energy: float | None) -> dict:
+    """A compact, link-independent identity descriptor for a track. Two uploads of
+    the same song (even via different links / re-encodes) land close on these;
+    mixreflect compares them to recognise re-uploads and new versions. Uses only
+    cues that survive re-encoding: duration, tempo, key, spectral balance, overall
+    energy, and the normalised arrangement boundaries (the song's energy 'shape')."""
+    structure = rec.get("structure") or {}
+    dur = rec.get("duration") or 0.0
+    secs = structure.get("sections") or []
+    bounds = [round((s.get("start") or 0.0) / dur, 3) for s in secs if dur] if dur else []
+    return {
+        "durationSec": rec.get("duration"),
+        "tempo": rec.get("bpm"),
+        "key": _format_key(rec.get("key")),
+        "spectral": spectral,
+        "energy": energy,
+        "sectionBounds": bounds,
+    }
+
+
 def to_audio_features(rec: dict) -> dict:
     """Map an analyze.analyze_file() record onto mixreflect's AudioFeatures shape
     (see src/lib/audio-analysis.ts). Returns the worker-side fields only;
@@ -315,6 +339,28 @@ def to_audio_features(rec: dict) -> dict:
         round(sum(vocal_env) / len(vocal_env), 3) if vocal_env else None
     )
     energy_1_10 = rec.get("energy")
+    energy_norm = round(energy_1_10 / 10.0, 3) if energy_1_10 else None
+    spectral = _derive_spectral(efeat)
+
+    # Per-stem balance — only present when the demucs/Replicate stem pass ran (deep
+    # reads). Lets the model say "the vocal sits under the guitars", not guess.
+    stems_used = structure.get("structureSource") == "demucs"
+    stem_mix = None
+    if stems_used:
+        drums_m = _mean(structure.get("drums"))
+        bass_m = _mean(structure.get("bass"))
+        voc_m = _mean(structure.get("vocal"))
+        inst = [v for v in (drums_m, bass_m) if v is not None]
+        stem_mix = {
+            "drums": drums_m,
+            "bass": bass_m,
+            "vocals": voc_m,
+            # >1 = vocal sits above the rhythm section; <1 = tucked under it.
+            "vocalVsInstruments": (
+                round(voc_m / (sum(inst) / len(inst)), 2)
+                if voc_m is not None and inst and sum(inst) > 0 else None
+            ),
+        }
 
     feat = {
         "durationSec": rec.get("duration"),
@@ -323,29 +369,35 @@ def to_audio_features(rec: dict) -> dict:
         # RMS dBFS — not a true integrated LUFS, but the right ballpark to feed the
         # model (the Spotify path feeds its `loudness` the same way).
         "loudnessLufs": efeat.get("rmsdb"),
-        "energy": round(energy_1_10 / 10.0, 3) if energy_1_10 else None,
-        "spectral": _derive_spectral(efeat),
+        "energy": energy_norm,
+        "spectral": spectral,
         "introLiftSec": mix_in.get("endSec"),
         "energyDips": _derive_dips(structure),
         # richer arrangement context (mixreflect's describeFeatures prints these):
         "sections": _sections_summary(structure),
         "vocalPresence": vocal_presence,
         "gridConfidence": structure.get("gridConfidence"),
+        "stemsUsed": stems_used or None,
+        "stemMix": stem_mix,
+        # link-independent track identity (re-upload / version detection):
+        "fingerprint": _acoustic_fingerprint(rec, spectral, energy_norm),
     }
     return {k: v for k, v in feat.items() if v is not None}
 
 
-def analyze_url(url: str) -> dict | None:
-    """Full pipeline: download → transcode → analyze → map. None on any failure."""
+def analyze_url(url: str, deep: bool = False) -> dict | None:
+    """Full pipeline: download → transcode → analyze → map. None on any failure.
+
+    `deep=True` runs the (slow, paid) stem-separation pass — drums/bass/vocals/
+    other structure + per-stem balance. The fast instant read uses `deep=False`
+    (quick=True), so only paid/deep reports pay the stem cost. cache_dir =
+    throwaway temp dir."""
     work_dir = tempfile.mkdtemp(prefix="djmix-worker-")
     try:
         wav = acquire_wav(url, work_dir)
         if not wav or not os.path.exists(wav):
             return None
-        # quick=False runs the demucs stem pass when DJMIX_STEMS=1 and demucs is
-        # installed (real song sections); it falls back to loudness structure
-        # automatically when demucs isn't available. cache_dir = throwaway temp dir.
-        rec = analyze.analyze_file(wav, work_dir, quick=False)
+        rec = analyze.analyze_file(wav, work_dir, quick=not deep)
         return to_audio_features(rec)
     except Exception as e:  # noqa: BLE001
         print(f"[worker] analysis failed for {url}: {e}", flush=True)
@@ -381,12 +433,15 @@ def make_handler(token: str | None):
         def do_GET(self):
             if urlparse(self.path).path == "/health":
                 stems_on = False
+                stem_backend = "none"
                 try:
                     import stems  # noqa: PLC0415
                     stems_on = stems.available() and os.environ.get("DJMIX_STEMS", "1") != "0"
+                    if stems_on:
+                        stem_backend = "local-demucs" if getattr(stems, "HAVE_DEMUCS", False) else "replicate"
                 except Exception:  # noqa: BLE001
                     pass
-                self._json({"ok": True, "worker": "djmix", "stems": stems_on, "ytCookies": _cookie_file() is not None, "proxy": bool(os.environ.get("YTDLP_PROXY")), "rev": "default-client"})
+                self._json({"ok": True, "worker": "djmix", "stems": stems_on, "stemBackend": stem_backend, "ytCookies": _cookie_file() is not None, "proxy": bool(os.environ.get("YTDLP_PROXY")), "rev": "stems-replicate"})
                 return
             self._json({"error": "not found"}, 404)
 
@@ -408,6 +463,7 @@ def make_handler(token: str | None):
             if not url:
                 self._json({"error": "url required"}, 400)
                 return
+            deep = bool(payload.get("deep"))
 
             # One analysis at a time per box — wait briefly, then shed load so a
             # burst of uploads queues/degrades instead of OOM-crashing the worker.
@@ -417,7 +473,7 @@ def make_handler(token: str | None):
                 return
             t0 = time.time()
             try:
-                features = analyze_url(url)
+                features = analyze_url(url, deep=deep)
             finally:
                 _ANALYZE_SEM.release()
             took = round(time.time() - t0, 1)
