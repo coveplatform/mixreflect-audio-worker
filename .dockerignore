@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+# never ship audio / scratch data into the image
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.ogg
+*.opus
+.cache/
+*.log

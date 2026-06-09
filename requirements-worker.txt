@@ -1,0 +1,7 @@
+# djmix audio worker (URL → DSP features for mixreflect score reports).
+# Reuses analyze.py's deps, plus yt-dlp for streaming links. ffmpeg must also be
+# installed and on PATH (used to transcode downloaded audio to wav).
+numpy>=1.24
+soundfile>=0.12
+mutagen>=1.46
+yt-dlp>=2024.1.0
