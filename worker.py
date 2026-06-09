@@ -227,8 +227,13 @@ def acquire_wav(url: str, work_dir: str) -> str | None:
         # Fallback: ffmpeg couldn't handle it but libsndfile might (uncapped).
         return raw if _soundfile_readable(raw) else None
 
-    # streaming site → yt-dlp already produces a wav via the ffmpeg postprocessor
-    return _fetch_ytdlp(url, work_dir)
+    # streaming site → yt-dlp produces a FULL-quality wav (48 kHz stereo, ~40 MB);
+    # transcode it down to mono 22.05 kHz too, or analyze.py OOMs the small box.
+    yt = _fetch_ytdlp(url, work_dir)
+    if not yt:
+        return None
+    small = os.path.join(work_dir, "track.wav")
+    return small if _transcode_to_wav(yt, small) else yt
 
 
 # ── map djmix record → mixreflect AudioFeatures ──────────────────────────────
@@ -399,12 +404,13 @@ def make_handler(token: str | None):
                         out["egressIp"] = "(no proxy set)"
                 except Exception as e:  # noqa: BLE001
                     out["egressIp"] = f"ERR {repr(e)[:160]}"
-                # 2) try the actual worker download
+                # 2) run the FULL pipeline (download + transcode + analyze)
                 wd = tempfile.mkdtemp()
                 try:
                     t = time.time()
-                    wav = acquire_wav("https://youtu.be/taur4j7zh3s", wd)
-                    out["gotWav"] = bool(wav)
+                    feats = analyze_url("https://youtu.be/taur4j7zh3s")
+                    out["grounded"] = feats is not None
+                    out["durationSec"] = feats.get("durationSec") if feats else None
                     out["took"] = round(time.time() - t, 1)
                 except Exception as e:  # noqa: BLE001
                     out["downloadError"] = repr(e)[:400]
