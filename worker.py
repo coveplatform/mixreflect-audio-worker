@@ -143,15 +143,17 @@ def _fetch_ytdlp(url: str, out_dir: str) -> str | None:
         "postprocessors": [
             {"key": "FFmpegExtractAudio", "preferredcodec": "wav"},
         ],
-        # YouTube blocks datacenter IPs via the default web client; the android/ios
-        # innertube clients dodge a lot of that even without cookies.
-        "extractor_args": {"youtube": {"player_client": ["android", "ios", "web"]}},
     }
-    # Cookies are the real fix for YouTube bot-walls on cloud IPs. Provide them as
-    # base64 (YTDLP_COOKIES_B64) or a file path (YTDLP_COOKIES_FILE).
+    # Cookies are the real fix for YouTube bot-walls on cloud IPs (base64 env
+    # YTDLP_COOKIES_B64 or a path YTDLP_COOKIES_FILE).
     cookies = _cookie_file()
     if cookies:
         opts["cookiefile"] = cookies
+        # The WEB client is what actually uses the cookies — must come first.
+        opts["extractor_args"] = {"youtube": {"player_client": ["web", "android", "ios"]}}
+    else:
+        # No cookies → the android/ios innertube clients dodge more of the wall.
+        opts["extractor_args"] = {"youtube": {"player_client": ["android", "ios", "web"]}}
     # Only pull the first MAX_ANALYZE_SECS so the wav (and analysis) stays small.
     try:
         from yt_dlp.utils import download_range_func  # noqa: PLC0415
