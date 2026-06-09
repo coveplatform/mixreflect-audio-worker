@@ -374,7 +374,7 @@ def make_handler(token: str | None):
                     stems_on = stems.available() and os.environ.get("DJMIX_STEMS", "1") != "0"
                 except Exception:  # noqa: BLE001
                     pass
-                self._json({"ok": True, "worker": "djmix", "stems": stems_on})
+                self._json({"ok": True, "worker": "djmix", "stems": stems_on, "ytCookies": _cookie_file() is not None})
                 return
             self._json({"error": "not found"}, 404)
 
