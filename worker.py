@@ -388,37 +388,6 @@ def make_handler(token: str | None):
                     pass
                 self._json({"ok": True, "worker": "djmix", "stems": stems_on, "ytCookies": _cookie_file() is not None, "proxy": bool(os.environ.get("YTDLP_PROXY")), "rev": "default-client"})
                 return
-            if urlparse(self.path).path == "/selftest":
-                # TEMP diagnostic: run the real pipeline on a fixed YouTube URL in
-                # prod and report the exact failure. Remove once YouTube grounds.
-                import traceback as _tb
-                out = {"proxy": bool(os.environ.get("YTDLP_PROXY")), "cookies": _cookie_file() is not None}
-                # 1) what IP does the proxy give us, from THIS box?
-                try:
-                    import urllib.request  # noqa: PLC0415
-                    p = os.environ.get("YTDLP_PROXY")
-                    if p:
-                        opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": p, "https": p}))
-                        out["egressIp"] = opener.open("https://ipv4.webshare.io/", timeout=20).read().decode().strip()[:64]
-                    else:
-                        out["egressIp"] = "(no proxy set)"
-                except Exception as e:  # noqa: BLE001
-                    out["egressIp"] = f"ERR {repr(e)[:160]}"
-                # 2) run the FULL pipeline (download + transcode + analyze)
-                wd = tempfile.mkdtemp()
-                try:
-                    t = time.time()
-                    feats = analyze_url("https://youtu.be/taur4j7zh3s")
-                    out["grounded"] = feats is not None
-                    out["durationSec"] = feats.get("durationSec") if feats else None
-                    out["took"] = round(time.time() - t, 1)
-                except Exception as e:  # noqa: BLE001
-                    out["downloadError"] = repr(e)[:400]
-                    out["trace"] = _tb.format_exc()[-400:]
-                finally:
-                    shutil.rmtree(wd, ignore_errors=True)
-                self._json(out)
-                return
             self._json({"error": "not found"}, 404)
 
         def do_POST(self):
