@@ -146,6 +146,12 @@ def _fetch_ytdlp(url: str, out_dir: str) -> str | None:
     }
     # Cookies are the real fix for YouTube bot-walls on cloud IPs (base64 env
     # YTDLP_COOKIES_B64 or a path YTDLP_COOKIES_FILE).
+    # A residential proxy is the real fix for YouTube's datacenter-IP block —
+    # the IP is the problem, not auth. Set YTDLP_PROXY to a proxy URL.
+    proxy = os.environ.get("YTDLP_PROXY")
+    if proxy:
+        opts["proxy"] = proxy
+
     cookies = _cookie_file()
     if cookies:
         opts["cookiefile"] = cookies
