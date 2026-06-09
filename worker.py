@@ -58,6 +58,9 @@ os.environ.setdefault("DJMIX_STEMS", "1")
 DIRECT_AUDIO_EXT = (".mp3", ".wav", ".flac", ".aiff", ".aif", ".ogg", ".m4a", ".opus")
 MAX_DOWNLOAD_BYTES = 60 * 1024 * 1024  # 60 MB cap — a single track, not an album rip
 DOWNLOAD_TIMEOUT = 45  # seconds for the network fetch
+# Only analyse the first N seconds — the analysis arrays scale with duration, and
+# this keeps peak memory inside a small (512 MB) box. Plenty to score a track.
+MAX_ANALYZE_SECS = int(os.environ.get("MAX_ANALYZE_SECS", "210"))
 
 
 # ── download ─────────────────────────────────────────────────────────────────
@@ -108,6 +111,13 @@ def _fetch_ytdlp(url: str, out_dir: str) -> str | None:
             {"key": "FFmpegExtractAudio", "preferredcodec": "wav"},
         ],
     }
+    # Only pull the first MAX_ANALYZE_SECS so the wav (and analysis) stays small.
+    try:
+        from yt_dlp.utils import download_range_func  # noqa: PLC0415
+        opts["download_ranges"] = download_range_func(None, [(0, MAX_ANALYZE_SECS)])
+        opts["force_keyframes_at_cuts"] = True
+    except Exception:  # noqa: BLE001
+        pass
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
@@ -139,7 +149,7 @@ def _transcode_to_wav(src: str, dest: str) -> bool:
         return False
     try:
         subprocess.run(
-            ["ffmpeg", "-y", "-i", src, "-ac", "1", "-ar", "22050", dest],
+            ["ffmpeg", "-y", "-i", src, "-t", str(MAX_ANALYZE_SECS), "-ac", "1", "-ar", "22050", dest],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -161,12 +171,13 @@ def acquire_wav(url: str, work_dir: str) -> str | None:
         raw = os.path.join(work_dir, "raw_input")
         if not _fetch_direct(url, raw):
             return None
-        # wav/flac/ogg/aiff: libsndfile reads them as-is, no ffmpeg needed.
-        if _soundfile_readable(raw):
-            return raw
-        # mp3/m4a/opus: transcode to wav via ffmpeg.
+        # Always transcode → caps duration (MAX_ANALYZE_SECS) and normalises to
+        # mono 22.05 kHz, so even a long wav/flac upload stays inside memory.
         wav = os.path.join(work_dir, "track.wav")
-        return wav if _transcode_to_wav(raw, wav) else None
+        if _transcode_to_wav(raw, wav):
+            return wav
+        # Fallback: ffmpeg couldn't handle it but libsndfile might (uncapped).
+        return raw if _soundfile_readable(raw) else None
 
     # streaming site → yt-dlp already produces a wav via the ffmpeg postprocessor
     return _fetch_ytdlp(url, work_dir)
