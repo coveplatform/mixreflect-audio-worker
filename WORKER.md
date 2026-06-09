@@ -81,5 +81,28 @@ change is needed beyond the env vars.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| GET | `/health` | none | liveness probe |
-| POST | `/analyze` | bearer | `{url}` → `{features, took}` |
+| GET | `/health` | none | liveness probe (`stems`, `stemBackend`) |
+| POST | `/analyze` | bearer | `{url, deep?}` → `{features, took}` |
+
+`deep: true` runs the stem-separation pass (drums/bass/vocals/other balance +
+richer structure); the default fast read skips it. mixreflect sends `deep: true`
+only for paid "deep" reports.
+
+## Stems via Replicate (no torch on this box)
+
+Demucs is heavy (torch, ideally a GPU). Instead of installing it here, the worker
+offloads the GPU separation to **Replicate** and runs the light numpy structure
+analysis locally. To enable, set on the deployment:
+
+```
+REPLICATE_API_TOKEN=r8_xxx                  # from replicate.com/account/api-tokens
+# optional — pin the demucs model+version (verify the SHA on the model page):
+REPLICATE_DEMUCS_MODEL=cjwbw/demucs:<version>
+```
+
+- `stems.available()` is true when a local demucs install exists **or** the token
+  is set; `separate()` prefers local demucs, else calls Replicate.
+- Cost: ~$0.02 per separated track, and only `deep` requests pay it (~paid reports).
+- Verify: `GET /health` → `"stemBackend": "replicate"` once the token is live.
+- No token, no torch → stems stay off and the worker uses the loudness-based
+  structure fallback (still grounded, just no per-stem detail).
