@@ -42,6 +42,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -61,6 +62,12 @@ DOWNLOAD_TIMEOUT = 45  # seconds for the network fetch
 # Only analyse the first N seconds — the analysis arrays scale with duration, and
 # this keeps peak memory inside a small (512 MB) box. Plenty to score a track.
 MAX_ANALYZE_SECS = int(os.environ.get("MAX_ANALYZE_SECS", "210"))
+# Serialize analysis so concurrent uploads can't run in parallel and double the
+# memory (→ OOM on a small box). Excess requests wait briefly, then shed load
+# (return no features → caller falls back to a non-grounded read, never a crash).
+MAX_CONCURRENCY = int(os.environ.get("MAX_CONCURRENCY", "1"))
+QUEUE_WAIT_SECS = int(os.environ.get("QUEUE_WAIT_SECS", "20"))
+_ANALYZE_SEM = threading.BoundedSemaphore(MAX_CONCURRENCY)
 
 
 # ── download ─────────────────────────────────────────────────────────────────
@@ -356,8 +363,17 @@ def make_handler(token: str | None):
                 self._json({"error": "url required"}, 400)
                 return
 
+            # One analysis at a time per box — wait briefly, then shed load so a
+            # burst of uploads queues/degrades instead of OOM-crashing the worker.
+            if not _ANALYZE_SEM.acquire(timeout=QUEUE_WAIT_SECS):
+                print(f"[worker] busy — shedding {url}", flush=True)
+                self._json({"features": None, "busy": True})
+                return
             t0 = time.time()
-            features = analyze_url(url)
+            try:
+                features = analyze_url(url)
+            finally:
+                _ANALYZE_SEM.release()
             took = round(time.time() - t0, 1)
             # Always reply 200 with a `{ features }` envelope: null means "couldn't
             # ground this one" so mixreflect falls back to its non-grounded read
