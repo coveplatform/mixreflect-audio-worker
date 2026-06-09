@@ -97,6 +97,32 @@ def _fetch_direct(url: str, dest: str) -> bool:
         return False
 
 
+_COOKIE_PATH: str | None = None
+
+def _cookie_file() -> str | None:
+    """Resolve a yt-dlp cookies file: base64 env (YTDLP_COOKIES_B64) → temp file,
+    or an explicit path (YTDLP_COOKIES_FILE). Cached after first materialisation."""
+    global _COOKIE_PATH
+    if _COOKIE_PATH and os.path.exists(_COOKIE_PATH):
+        return _COOKIE_PATH
+    b64 = os.environ.get("YTDLP_COOKIES_B64")
+    if b64:
+        try:
+            import base64  # noqa: PLC0415
+            path = os.path.join(tempfile.gettempdir(), "yt_cookies.txt")
+            with open(path, "wb") as f:
+                f.write(base64.b64decode(b64))
+            _COOKIE_PATH = path
+            return path
+        except Exception as e:  # noqa: BLE001
+            print(f"[worker] failed to load YTDLP_COOKIES_B64: {e}", flush=True)
+    p = os.environ.get("YTDLP_COOKIES_FILE")
+    if p and os.path.exists(p):
+        _COOKIE_PATH = p
+        return p
+    return None
+
+
 def _fetch_ytdlp(url: str, out_dir: str) -> str | None:
     """Download bestaudio via yt-dlp and transcode to wav. Returns the wav path."""
     try:
@@ -117,7 +143,15 @@ def _fetch_ytdlp(url: str, out_dir: str) -> str | None:
         "postprocessors": [
             {"key": "FFmpegExtractAudio", "preferredcodec": "wav"},
         ],
+        # YouTube blocks datacenter IPs via the default web client; the android/ios
+        # innertube clients dodge a lot of that even without cookies.
+        "extractor_args": {"youtube": {"player_client": ["android", "ios", "web"]}},
     }
+    # Cookies are the real fix for YouTube bot-walls on cloud IPs. Provide them as
+    # base64 (YTDLP_COOKIES_B64) or a file path (YTDLP_COOKIES_FILE).
+    cookies = _cookie_file()
+    if cookies:
+        opts["cookiefile"] = cookies
     # Only pull the first MAX_ANALYZE_SECS so the wav (and analysis) stays small.
     try:
         from yt_dlp.utils import download_range_func  # noqa: PLC0415
@@ -404,6 +438,7 @@ def main():
         print("[worker] WARNING: AUDIO_WORKER_SECRET not set — /analyze is open", flush=True)
     if not shutil.which("ffmpeg"):
         print("[worker] WARNING: ffmpeg not found on PATH — analysis will fail", flush=True)
+    print(f"[worker] youtube cookies: {'loaded ✓' if _cookie_file() else 'NOT set (YouTube links may be blocked)'}", flush=True)
 
     server = ThreadingHTTPServer((args.host, args.port), make_handler(token))
     print(f"djmix worker — listening on http://{args.host}:{args.port}", flush=True)
