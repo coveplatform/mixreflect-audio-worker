@@ -155,11 +155,10 @@ def _fetch_ytdlp(url: str, out_dir: str) -> str | None:
     cookies = _cookie_file()
     if cookies:
         opts["cookiefile"] = cookies
-        # The WEB client is what actually uses the cookies — must come first.
-        opts["extractor_args"] = {"youtube": {"player_client": ["web", "android", "ios"]}}
-    else:
-        # No cookies → the android/ios innertube clients dodge more of the wall.
-        opts["extractor_args"] = {"youtube": {"player_client": ["android", "ios", "web"]}}
+    # NB: do NOT pin player_client — forcing android/ios excludes the client that
+    # actually has downloadable formats ("Requested format is not available").
+    # yt-dlp keeps its default client selection current; with a residential proxy
+    # the defaults download fine.
     # Only pull the first MAX_ANALYZE_SECS so the wav (and analysis) stays small.
     try:
         from yt_dlp.utils import download_range_func  # noqa: PLC0415
