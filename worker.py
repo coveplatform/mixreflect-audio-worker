@@ -168,14 +168,22 @@ def _fetch_ytdlp(url: str, out_dir: str) -> str | None:
         pass
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([url])
+            # extract_info(download=True) == download, but also hands us the
+            # metadata — `duration` is the FULL source length even when
+            # download_ranges only pulled the first MAX_ANALYZE_SECS.
+            info = ydl.extract_info(url, download=True)
     except Exception as e:  # noqa: BLE001
         print(f"[worker] yt-dlp failed: {e}", flush=True)
         return None
 
+    src_dur = None
+    try:
+        src_dur = float(info.get("duration")) if info and info.get("duration") else None
+    except Exception:  # noqa: BLE001
+        pass
     for nm in os.listdir(out_dir):
         if nm.lower().endswith(".wav"):
-            return os.path.join(out_dir, nm)
+            return os.path.join(out_dir, nm), src_dur
     return None
 
 
@@ -209,8 +217,26 @@ def _transcode_to_wav(src: str, dest: str) -> bool:
         return False
 
 
-def acquire_wav(url: str, work_dir: str) -> str | None:
-    """Get a libsndfile-readable wav for `url`, or None if we can't."""
+def _probe_duration(path: str) -> float | None:
+    """Source duration via ffprobe (pre-cap), so we can report how much of a
+    long track the MAX_ANALYZE_SECS window actually covered."""
+    if not shutil.which("ffprobe"):
+        return None
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            check=True, capture_output=True, text=True, timeout=30,
+        ).stdout.strip()
+        return float(out) if out else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def acquire_wav(url: str, work_dir: str) -> tuple[str, float | None] | None:
+    """Get a libsndfile-readable wav for `url` → (path, source duration secs or
+    None). The wav is capped at MAX_ANALYZE_SECS; the duration is the FULL
+    source length when we can know it, so the app can tell a truncated read."""
     scheme = urlparse(url).scheme.lower()
     if scheme not in ("http", "https"):
         return None
@@ -219,21 +245,23 @@ def acquire_wav(url: str, work_dir: str) -> str | None:
         raw = os.path.join(work_dir, "raw_input")
         if not _fetch_direct(url, raw):
             return None
+        src_dur = _probe_duration(raw)
         # Always transcode → caps duration (MAX_ANALYZE_SECS) and normalises to
         # mono 22.05 kHz, so even a long wav/flac upload stays inside memory.
         wav = os.path.join(work_dir, "track.wav")
         if _transcode_to_wav(raw, wav):
-            return wav
+            return wav, src_dur
         # Fallback: ffmpeg couldn't handle it but libsndfile might (uncapped).
-        return raw if _soundfile_readable(raw) else None
+        return (raw, src_dur) if _soundfile_readable(raw) else None
 
     # streaming site → yt-dlp produces a FULL-quality wav (48 kHz stereo, ~40 MB);
     # transcode it down to mono 22.05 kHz too, or analyze.py OOMs the small box.
     yt = _fetch_ytdlp(url, work_dir)
     if not yt:
         return None
+    yt_path, src_dur = yt
     small = os.path.join(work_dir, "track.wav")
-    return small if _transcode_to_wav(yt, small) else yt
+    return (small, src_dur) if _transcode_to_wav(yt_path, small) else (yt_path, src_dur)
 
 
 # ── map djmix record → mixreflect AudioFeatures ──────────────────────────────
@@ -385,20 +413,66 @@ def to_audio_features(rec: dict) -> dict:
     return {k: v for k, v in feat.items() if v is not None}
 
 
+def _report_waveform(cache_dir: str, tid: str, cols: int = 1200) -> dict | None:
+    """Compact 3-band waveform for the report page. analyze_file already computes
+    the full-res rekordbox-style detail block (per-column LOW/MID/HIGH peaks +
+    RMS body) and writes it to <cache>/wave/<id>.json — this max-pools it down to
+    ~`cols` columns (a few KB of base64) so the report can draw a real frequency-
+    split waveform. Max (not mean) pooling keeps the kicks/transients crisp."""
+    try:
+        import base64  # noqa: PLC0415
+        import numpy as np  # noqa: PLC0415
+
+        with open(os.path.join(cache_dir, "wave", f"{tid}.json")) as f:
+            detail = (json.load(f) or {}).get("detail") or {}
+        n = int(detail.get("n") or 0)
+        if not n or not all(detail.get(k) for k in ("lo", "mid", "hi", "amp")):
+            return None
+
+        def pool(b64s: str) -> str:
+            a = np.frombuffer(base64.b64decode(b64s), dtype=np.uint8)
+            if len(a) > cols:
+                starts = np.linspace(0, len(a), cols, endpoint=False).astype(np.int64)
+                a = np.maximum.reduceat(a, starts)
+            return base64.b64encode(a.tobytes()).decode("ascii")
+
+        return {
+            "n": min(cols, n),
+            "lo": pool(detail["lo"]),
+            "mid": pool(detail["mid"]),
+            "hi": pool(detail["hi"]),
+            "amp": pool(detail["amp"]),
+        }
+    except Exception as e:  # noqa: BLE001 — waveform is decorative; never fail the read
+        print(f"[worker] report waveform failed: {e}", flush=True)
+        return None
+
+
 def analyze_url(url: str, deep: bool = False) -> dict | None:
     """Full pipeline: download → transcode → analyze → map. None on any failure.
 
-    `deep=True` runs the (slow, paid) stem-separation pass — drums/bass/vocals/
-    other structure + per-stem balance. The fast instant read uses `deep=False`
-    (quick=True), so only paid/deep reports pay the stem cost. cache_dir =
-    throwaway temp dir."""
+    `deep=True` runs the (slow) stem-separation pass — drums/bass/vocals/other
+    structure + per-stem balance. mixreflect now requests deep for ALL score
+    reads (instant included, ~$0.02/track on Replicate) — the paid gate is the
+    deep prose, not the analysis. cache_dir = throwaway temp dir."""
     work_dir = tempfile.mkdtemp(prefix="djmix-worker-")
     try:
-        wav = acquire_wav(url, work_dir)
-        if not wav or not os.path.exists(wav):
+        acquired = acquire_wav(url, work_dir)
+        if not acquired or not os.path.exists(acquired[0]):
             return None
+        wav, src_dur = acquired
         rec = analyze.analyze_file(wav, work_dir, quick=not deep)
-        return to_audio_features(rec)
+        feat = to_audio_features(rec)
+        # When the analysis window (MAX_ANALYZE_SECS) truncated a longer track,
+        # report the real source length so the read never claims an ending it
+        # didn't hear and the UI can label the analysed span honestly.
+        analyzed = feat.get("durationSec") or 0
+        if src_dur and src_dur > analyzed + 5:
+            feat["sourceDurationSec"] = round(src_dur, 1)
+        wf = _report_waveform(work_dir, rec.get("id"))
+        if wf:
+            feat["waveform"] = wf
+        return feat
     except Exception as e:  # noqa: BLE001
         print(f"[worker] analysis failed for {url}: {e}", flush=True)
         return None
