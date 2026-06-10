@@ -89,9 +89,23 @@ def _separate_replicate(path):
         for name, url in urls.items():
             dst = _os.path.join(tmp, f'{name}.wav')
             urllib.request.urlretrieve(url, dst)
+            # Memory discipline — this runs on a small box (Render starter =
+            # 512MB) and full-length 44.1k stereo float32 stems are ~74MB each;
+            # loading them naively OOM-killed the worker (no traceback, just a
+            # restart). Mono immediately, halve the rate (structure envelopes
+            # don't need 44.1k), and free every intermediate before the next
+            # stem downloads.
             data, sr = sf.read(dst, always_2d=True, dtype='float32')
-            sigs[name] = data.mean(axis=1).astype(np.float32)  # to mono
-            sr_common = sr_common or sr
+            mono = data.mean(axis=1, dtype=np.float32)
+            del data
+            dec = 2 if sr >= 44100 else 1
+            sigs[name] = np.ascontiguousarray(mono[::dec])
+            del mono
+            try:
+                _os.remove(dst)
+            except OSError:
+                pass
+            sr_common = sr_common or sr // dec
         # demucs stems share a sample rate; align lengths defensively.
         if sigs:
             n = min(len(s) for s in sigs.values())

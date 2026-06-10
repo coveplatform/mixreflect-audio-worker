@@ -515,7 +515,7 @@ def make_handler(token: str | None):
                         stem_backend = "local-demucs" if getattr(stems, "HAVE_DEMUCS", False) else "replicate"
                 except Exception:  # noqa: BLE001
                     pass
-                self._json({"ok": True, "worker": "djmix", "stems": stems_on, "stemBackend": stem_backend, "ytCookies": _cookie_file() is not None, "proxy": bool(os.environ.get("YTDLP_PROXY")), "rev": "stems-replicate"})
+                self._json({"ok": True, "worker": "djmix", "stems": stems_on, "stemBackend": stem_backend, "ytCookies": _cookie_file() is not None, "proxy": bool(os.environ.get("YTDLP_PROXY")), "rev": "stems-lowmem-1"})
                 return
             self._json({"error": "not found"}, 404)
 
