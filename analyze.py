@@ -227,19 +227,38 @@ def normalize_energy(records):
         records[i]['energy'] = int(min(10, max(1, round(1 + 9 * comp[k]))))
 
 
+def _block_band_sums(x, win, hop, masks, block=1024):
+    """Per-frame sums of |rfft(frame)| over the given boolean masks, computed in
+    BLOCKS of frames. The all-at-once version materialized the whole framed
+    track plus its complex128 spectrum (~300MB transient on a 480s window at
+    the fine onset hop) and OOM-killed small boxes; block-wise it's O(block)
+    (~20MB) with identical outputs to float32 precision."""
+    n = max(1, 1 + (len(x) - win) // hop)
+    w = np.hanning(win).astype(np.float32)
+    outs = [np.empty(n, dtype=np.float32) for _ in masks]
+    base = np.arange(win)
+    for b0 in range(0, n, block):
+        b1 = min(n, b0 + block)
+        idx = base[None, :] + hop * np.arange(b0, b1)[:, None]
+        np.clip(idx, 0, len(x) - 1, out=idx)
+        frames = x[idx] * w[None, :]
+        spec = np.abs(np.fft.rfft(frames, axis=1)).astype(np.float32)
+        del frames
+        for m, out in zip(masks, outs):
+            out[b0:b1] = spec[:, m].sum(axis=1)
+        del spec
+    return outs
+
+
 def band_frames(x, sr, win=2048, hop=2048):
     """Per-frame energy in low/mid/high bands + total, computed once and reused
     by both the waveform and the structure analysis."""
-    n = max(1, 1 + (len(x) - win) // hop)
-    idx = np.arange(win)[None, :] + hop * np.arange(n)[:, None]
-    idx = np.clip(idx, 0, len(x) - 1)
-    frames = x[idx] * np.hanning(win).astype(np.float32)[None, :]
-    spec = np.abs(np.fft.rfft(frames, axis=1))
     freqs = np.fft.rfftfreq(win, 1 / sr)
-    lo = spec[:, freqs < 250].sum(axis=1)
-    mid = spec[:, (freqs >= 250) & (freqs < 2500)].sum(axis=1)
-    hi = spec[:, freqs >= 2500].sum(axis=1)
-    amp = spec.sum(axis=1)
+    amp, lo, mid, hi = _block_band_sums(
+        x, win, hop,
+        [np.ones(len(freqs), dtype=bool), freqs < 250,
+         (freqs >= 250) & (freqs < 2500), freqs >= 2500],
+    )
     fps = sr / hop
     return amp, lo, mid, hi, fps
 
@@ -404,13 +423,12 @@ def onset_envelopes(x, sr, hop=512, win=1024):
     n = 1 + (len(x) - win) // hop
     if n < 16:
         return None
-    idx = np.arange(win)[None, :] + hop * np.arange(n)[:, None]
-    idx = np.clip(idx, 0, len(x) - 1)
-    frames = x[idx] * np.hanning(win).astype(np.float32)[None, :]
-    mag = np.abs(np.fft.rfft(frames, axis=1))
+    # Block-wise (see _block_band_sums): this fine hop frames the whole track —
+    # the all-at-once spectrum was the single biggest allocation in the analyzer.
     freqs = np.fft.rfftfreq(win, 1 / sr)
-    full = mag.sum(axis=1)
-    low = mag[:, freqs < 150].sum(axis=1)
+    full, low = _block_band_sums(
+        x, win, hop, [np.ones(len(freqs), dtype=bool), freqs < 150]
+    )
     fflux = np.concatenate([[0.0], np.maximum(0, np.diff(full))])
     lflux = np.concatenate([[0.0], np.maximum(0, np.diff(low))])
     return fflux, lflux, sr / hop
