@@ -173,8 +173,23 @@ def _fetch_ytdlp(url: str, out_dir: str) -> str | None:
             # download_ranges only pulled the first MAX_ANALYZE_SECS.
             info = ydl.extract_info(url, download=True)
     except Exception as e:  # noqa: BLE001
-        print(f"[worker] yt-dlp failed: {e}", flush=True)
-        return None
+        msg = str(e)
+        # Geo-blocked videos surface as "Video unavailable" from the proxy's
+        # exit region while playing fine elsewhere (observed live: a region-
+        # locked music video). One retry WITHOUT the proxy — the datacenter IP
+        # often passes geo even though it needs the proxy for bot-walls.
+        if proxy and "unavailable" in msg.lower():
+            print("[worker] unavailable via proxy — retrying direct", flush=True)
+            opts.pop("proxy", None)
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+            except Exception as e2:  # noqa: BLE001
+                print(f"[worker] yt-dlp failed (direct retry): {e2}", flush=True)
+                return None
+        else:
+            print(f"[worker] yt-dlp failed: {e}", flush=True)
+            return None
 
     src_dur = None
     try:
@@ -518,7 +533,7 @@ def make_handler(token: str | None):
                         stem_backend = "local-demucs" if getattr(stems, "HAVE_DEMUCS", False) else "replicate"
                 except Exception:  # noqa: BLE001
                     pass
-                self._json({"ok": True, "worker": "djmix", "stems": stems_on, "stemBackend": stem_backend, "ytCookies": _cookie_file() is not None, "proxy": bool(os.environ.get("YTDLP_PROXY")), "rev": "dsp-lowmem-2"})
+                self._json({"ok": True, "worker": "djmix", "stems": stems_on, "stemBackend": stem_backend, "ytCookies": _cookie_file() is not None, "proxy": bool(os.environ.get("YTDLP_PROXY")), "rev": "geo-retry-3"})
                 return
             self._json({"error": "not found"}, 404)
 
