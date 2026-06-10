@@ -62,12 +62,19 @@ DOWNLOAD_TIMEOUT = 45  # seconds for the network fetch
 # Only analyse the first N seconds — the analysis arrays scale with duration, and
 # this keeps peak memory inside a small (512 MB) box. Plenty to score a track.
 MAX_ANALYZE_SECS = int(os.environ.get("MAX_ANALYZE_SECS", "210"))
-# Serialize analysis so concurrent uploads can't run in parallel and double the
-# memory (→ OOM on a small box). Excess requests wait briefly, then shed load
-# (return no features → caller falls back to a non-grounded read, never a crash).
+# Serialize the LOCAL DSP pass so concurrent uploads can't run in parallel and
+# double the memory (→ OOM on a small box). Excess requests wait briefly, then
+# shed load (return no features → caller falls back to a non-grounded read,
+# never a crash). The slot covers ONLY the memory-heavy local analysis — not the
+# download and not the Replicate stem wait (network-idle), which used to pin it
+# for 2-6 minutes and starve every upload that arrived meanwhile.
 MAX_CONCURRENCY = int(os.environ.get("MAX_CONCURRENCY", "1"))
-QUEUE_WAIT_SECS = int(os.environ.get("QUEUE_WAIT_SECS", "20"))
+QUEUE_WAIT_SECS = int(os.environ.get("QUEUE_WAIT_SECS", "45"))
 _ANALYZE_SEM = threading.BoundedSemaphore(MAX_CONCURRENCY)
+# Deep stem passes serialize among themselves (each holds ~70MB of decoded stems
+# while post-processing). If one is already in flight, the next deep read keeps
+# its loudness structure instead of queueing behind a multi-minute Replicate run.
+_STEMS_SEM = threading.BoundedSemaphore(1)
 
 
 # ── download ─────────────────────────────────────────────────────────────────
@@ -466,20 +473,44 @@ def _report_waveform(cache_dir: str, tid: str, cols: int = 1200) -> dict | None:
         return None
 
 
-def analyze_url(url: str, deep: bool = False) -> dict | None:
-    """Full pipeline: download → transcode → analyze → map. None on any failure.
+BUSY = object()  # sentinel: shed for load, distinct from "couldn't analyze"
 
-    `deep=True` runs the (slow) stem-separation pass — drums/bass/vocals/other
-    structure + per-stem balance. mixreflect now requests deep for ALL score
-    reads (instant included, ~$0.02/track on Replicate) — the paid gate is the
-    deep prose, not the analysis. cache_dir = throwaway temp dir."""
+
+def analyze_url(url: str, deep: bool = False):
+    """Full pipeline: download → transcode → analyze → map. None on any failure;
+    the BUSY sentinel when the local-DSP slot couldn't be acquired in time.
+
+    `deep=True` adds the stem-separation pass (drums/bass/vocals/other structure
+    + per-stem balance) AFTER the quick pass, outside the analysis slot:
+    `analyze_file(quick=True)` used to keep every big DSP array alive in its
+    frame while stems ran (and on Replicate, while a 2-6 min prediction queued)
+    — OOM-killing the box AND starving concurrent uploads. Now the quick pass
+    finishes and frees its arrays first, then `deepen_structure` upgrades the
+    sectioning from the wav on disk. cache_dir = throwaway temp dir."""
     work_dir = tempfile.mkdtemp(prefix="djmix-worker-")
     try:
         acquired = acquire_wav(url, work_dir)
         if not acquired or not os.path.exists(acquired[0]):
             return None
         wav, src_dur = acquired
-        rec = analyze.analyze_file(wav, work_dir, quick=not deep)
+        # The memory-heavy phase — one at a time on the small box.
+        if not _ANALYZE_SEM.acquire(timeout=QUEUE_WAIT_SECS):
+            return BUSY
+        try:
+            rec = analyze.analyze_file(wav, work_dir, quick=True)
+        finally:
+            _ANALYZE_SEM.release()
+        if deep:
+            # Stems are an upgrade, never a dependency: if another deep read
+            # already holds the stems slot, keep the loudness structure rather
+            # than queue behind a multi-minute Replicate run.
+            if _STEMS_SEM.acquire(timeout=15):
+                try:
+                    rec = analyze.deepen_structure(rec, wav)
+                finally:
+                    _STEMS_SEM.release()
+            else:
+                print(f"[worker] stems busy — loudness structure for {url}", flush=True)
         feat = to_audio_features(rec)
         # When the analysis window (MAX_ANALYZE_SECS) truncated a longer track,
         # report the real source length so the read never claims an ending it
@@ -533,7 +564,7 @@ def make_handler(token: str | None):
                         stem_backend = "local-demucs" if getattr(stems, "HAVE_DEMUCS", False) else "replicate"
                 except Exception:  # noqa: BLE001
                     pass
-                self._json({"ok": True, "worker": "djmix", "stems": stems_on, "stemBackend": stem_backend, "ytCookies": _cookie_file() is not None, "proxy": bool(os.environ.get("YTDLP_PROXY")), "rev": "mem-blocks-4"})
+                self._json({"ok": True, "worker": "djmix", "stems": stems_on, "stemBackend": stem_backend, "ytCookies": _cookie_file() is not None, "proxy": bool(os.environ.get("YTDLP_PROXY")), "rev": "slot-free-stems-1"})
                 return
             self._json({"error": "not found"}, 404)
 
@@ -557,18 +588,15 @@ def make_handler(token: str | None):
                 return
             deep = bool(payload.get("deep"))
 
-            # One analysis at a time per box — wait briefly, then shed load so a
-            # burst of uploads queues/degrades instead of OOM-crashing the worker.
-            if not _ANALYZE_SEM.acquire(timeout=QUEUE_WAIT_SECS):
+            t0 = time.time()
+            features = analyze_url(url, deep=deep)
+            took = round(time.time() - t0, 1)
+            # Shed for load (local-DSP slot stayed busy past QUEUE_WAIT_SECS):
+            # a burst of uploads degrades instead of OOM-crashing the worker.
+            if features is BUSY:
                 print(f"[worker] busy — shedding {url}", flush=True)
                 self._json({"features": None, "busy": True})
                 return
-            t0 = time.time()
-            try:
-                features = analyze_url(url, deep=deep)
-            finally:
-                _ANALYZE_SEM.release()
-            took = round(time.time() - t0, 1)
             # Always reply 200 with a `{ features }` envelope: null means "couldn't
             # ground this one" so mixreflect falls back to its non-grounded read
             # instead of treating it as an outage.

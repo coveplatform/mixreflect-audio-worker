@@ -38,6 +38,12 @@ REPLICATE_DEMUCS_MODEL = _os.environ.get(
     'REPLICATE_DEMUCS_MODEL',
     'cjwbw/demucs:25a173108cff36ef9f80f854c162d01df9e6528be175794b81158fa03836d953',
 )
+# Hard ceiling on the Replicate round-trip (queue + run). Cold starts were
+# observed at 6+ minutes — past the app's whole serverless budget — and an
+# unbounded wait pinned the worker while the caller had long since given up.
+# On timeout the prediction is cancelled (stop paying) and the read keeps its
+# loudness structure: stems are an upgrade, never a dependency.
+REPLICATE_TIMEOUT_SECS = int(_os.environ.get('REPLICATE_TIMEOUT_SECS', '150'))
 
 
 def _replicate_enabled():
@@ -57,12 +63,31 @@ def _separate_replicate(path):
         import replicate  # noqa: PLC0415
         import urllib.request  # noqa: PLC0415
         import tempfile  # noqa: PLC0415
+        import time  # noqa: PLC0415
     except Exception as e:  # noqa: BLE001
         print(f'  replicate import failed: {e}', flush=True)
         return None
     try:
+        # predictions.create + bounded poll instead of replicate.run(): run()
+        # blocks until the prediction finishes, however long the GPU queue is.
+        version = REPLICATE_DEMUCS_MODEL.split(':', 1)[-1]
         with open(path, 'rb') as fh:
-            out = replicate.run(REPLICATE_DEMUCS_MODEL, input={'audio': fh})
+            pred = replicate.predictions.create(version=version, input={'audio': fh})
+        deadline = time.time() + REPLICATE_TIMEOUT_SECS
+        while pred.status not in ('succeeded', 'failed', 'canceled'):
+            if time.time() > deadline:
+                try:
+                    pred.cancel()
+                except Exception:  # noqa: BLE001
+                    pass
+                print(f'  replicate demucs timed out ({REPLICATE_TIMEOUT_SECS}s) — skipping stems', flush=True)
+                return None
+            time.sleep(3)
+            pred.reload()
+        if pred.status != 'succeeded':
+            print(f'  replicate demucs {pred.status}: {pred.error}', flush=True)
+            return None
+        out = pred.output
     except Exception as e:  # noqa: BLE001
         print(f'  replicate demucs failed: {e}', flush=True)
         return None
