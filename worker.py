@@ -199,13 +199,16 @@ def _soundfile_readable(path: str) -> bool:
 
 
 def _transcode_to_wav(src: str, dest: str) -> bool:
-    """ffmpeg → mono 22.05 kHz wav (plenty for the analysis, and fast/small)."""
+    """ffmpeg → mono 16 kHz wav. Everything the analysis measures (bands split
+    at 160 Hz / 2 kHz, tempo, key, structure) lives comfortably under the 8 kHz
+    Nyquist, and vs 22.05 kHz it's ~27% fewer samples through every FFT — less
+    memory AND less CPU on the small box."""
     if not shutil.which("ffmpeg"):
         print("[worker] ffmpeg not on PATH — cannot transcode", flush=True)
         return False
     try:
         subprocess.run(
-            ["ffmpeg", "-y", "-i", src, "-t", str(MAX_ANALYZE_SECS), "-ac", "1", "-ar", "22050", dest],
+            ["ffmpeg", "-y", "-i", src, "-t", str(MAX_ANALYZE_SECS), "-ac", "1", "-ar", "16000", dest],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -515,7 +518,7 @@ def make_handler(token: str | None):
                         stem_backend = "local-demucs" if getattr(stems, "HAVE_DEMUCS", False) else "replicate"
                 except Exception:  # noqa: BLE001
                     pass
-                self._json({"ok": True, "worker": "djmix", "stems": stems_on, "stemBackend": stem_backend, "ytCookies": _cookie_file() is not None, "proxy": bool(os.environ.get("YTDLP_PROXY")), "rev": "stems-lowmem-1"})
+                self._json({"ok": True, "worker": "djmix", "stems": stems_on, "stemBackend": stem_backend, "ytCookies": _cookie_file() is not None, "proxy": bool(os.environ.get("YTDLP_PROXY")), "rev": "dsp-lowmem-2"})
                 return
             self._json({"error": "not found"}, 404)
 

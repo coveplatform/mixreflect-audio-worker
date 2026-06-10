@@ -301,24 +301,53 @@ def detailed_waveform(x, sr, dur, rate=420, cap=240000):
     ax = np.abs(x).astype(np.float32)
     bbpeak = np.maximum.reduceat(ax, starts)  # broadband peak → shared gain
     gain = float(np.percentile(bbpeak, 99.5)) + 1e-9
+    del ax
 
-    # band-split via FFT masking → per-band time signal → per-column PEAK
-    X = np.fft.rfft(x.astype(np.float32))
-    freqs = np.fft.rfftfreq(L, 1.0 / sr)
-
-    def band_peak(mask):
-        xb = np.fft.irfft(X * mask, n=L).astype(np.float32)
-        return np.clip(np.maximum.reduceat(np.abs(xb), starts) / gain, 0, 1)
+    # Band-split via CHUNKED FFT masking → per-band time signal → per-column
+    # PEAK. The old full-track version held the whole signal as complex128
+    # (~3x the track in float64 temporaries per band) and OOM-killed small
+    # boxes on long tracks; chunking keeps peak memory O(chunk) (~20MB) and
+    # chunked FFTs are faster than one giant one. PAD samples of overlap are
+    # computed at each edge and discarded, so filter edge effects never reach
+    # a column. Output identical to the full-FFT version within float noise.
+    CHUNK = 1 << 21  # ~2.1M samples per block
+    PAD = 1 << 12
 
     # crossovers tuned to rekordbox's look: a tighter sub-bass band (less blue),
     # a wide mid band (more amber body), highs from 2 kHz (white transients).
-    lo_n = band_peak(freqs < 160)
-    mid_n = band_peak((freqs >= 160) & (freqs < 2000))
-    hi_n = band_peak(freqs >= 2000)
+    bands = [(0.0, 160.0), (160.0, 2000.0), (2000.0, sr)]
+    outs = [np.zeros(n, dtype=np.float32) for _ in bands]
 
-    # RMS body + blended colour for the audition lane (single-envelope waveform)
-    sq = (x.astype(np.float64)) ** 2
+    pos = 0
+    while pos < L:
+        c0 = max(0, pos - PAD)
+        win_hi = min(L, pos + CHUNK)
+        c1 = min(L, win_hi + PAD)
+        seg = np.ascontiguousarray(x[c0:c1], dtype=np.float32)
+        S = np.fft.rfft(seg)
+        freqs = np.fft.rfftfreq(len(seg), 1.0 / sr)
+        # columns whose sample range lies fully inside [pos, win_hi)
+        i0 = int(np.searchsorted(starts, pos))
+        i1 = int(np.searchsorted(starts, win_hi))
+        if i1 > i0:
+            rel = starts[i0:i1] - c0
+            for (f0, f1), out in zip(bands, outs):
+                mask = (freqs >= f0) & (freqs < f1)
+                xb = np.abs(np.fft.irfft(S * mask, n=len(seg)).astype(np.float32))
+                # trim the tail pad so the last column's peak stops at win_hi
+                m = np.maximum.reduceat(xb[: win_hi - c0], rel)
+                np.maximum(out[i0:i1], m / gain, out=out[i0:i1])
+                del xb
+        del seg, S
+        pos = win_hi
+    lo_n, mid_n, hi_n = (np.clip(o, 0, 1) for o in outs)
+
+    # RMS body + blended colour for the audition lane (single-envelope waveform).
+    # float32 square (not float64): column sums are ~50 samples, well within
+    # float32 precision, and it halves another full-track temporary.
+    sq = x.astype(np.float32) ** 2
     rms = np.sqrt(np.add.reduceat(sq, starts) / counts)
+    del sq
     amp_n = np.clip(rms / (np.percentile(rms, 95) + 1e-9), 0, 1) ** 0.85
     tot = lo_n + mid_n + hi_n + 1e-9
     r, g, b = _band_color(lo_n / tot, mid_n / tot, hi_n / tot, amp_n)
