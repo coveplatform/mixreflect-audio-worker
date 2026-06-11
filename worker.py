@@ -473,6 +473,77 @@ def _report_waveform(cache_dir: str, tid: str, cols: int = 1200) -> dict | None:
         return None
 
 
+# ── listen-pass excerpt + crest factor (score engine v2) ─────────────────────
+
+# Opening excerpt (base64 mp3) handed to the app's audio-LLM listen pass. Mono
+# 32 kHz @ 64 kbps keeps 90s around ~700 KB raw / ~1 MB base64. 0 disables.
+EXCERPT_SECS = int(os.environ.get("EXCERPT_SECS", "90"))
+
+
+def _peak_db(path: str) -> float | None:
+    """True sample peak (dBFS), chunked read — never loads the file whole."""
+    try:
+        import soundfile as sf  # noqa: PLC0415
+        peak = 0.0
+        with sf.SoundFile(path) as f:
+            while True:
+                block = f.read(262144, dtype="float32", always_2d=True)
+                if block is None or len(block) == 0:
+                    break
+                m = float(abs(block).max())
+                if m > peak:
+                    peak = m
+        return 20.0 * math.log10(peak) if peak > 1e-6 else None
+    except Exception as e:  # noqa: BLE001
+        print(f"[worker] peak measure failed: {e}", flush=True)
+        return None
+
+
+def _crest_db(wav_path: str, rmsdb) -> float | None:
+    """Crest factor = peak − RMS (dB). Low = squashed master, high = dynamic
+    (or an unmastered-quiet bounce). RMS comes from the analysis (efeat.rmsdb)."""
+    if rmsdb is None:
+        return None
+    peak = _peak_db(wav_path)
+    if peak is None:
+        return None
+    return round(max(0.0, peak - float(rmsdb)), 1)
+
+
+def _excerpt_source(work_dir: str, analyzed_wav: str) -> str:
+    """Best audio to excerpt from: the pre-16kHz download (full bandwidth) when
+    it's still in the work dir, else the analysed wav (8 kHz ceiling — usable)."""
+    for nm in os.listdir(work_dir):
+        if nm == "raw_input" or (nm.startswith("src.") and not nm.endswith(".part")):
+            return os.path.join(work_dir, nm)
+    return analyzed_wav
+
+
+def _encode_excerpt(work_dir: str, analyzed_wav: str, dur: float | None) -> dict | None:
+    """ffmpeg → mono 32 kHz 64 kbps mp3 of the opening EXCERPT_SECS, base64."""
+    if EXCERPT_SECS <= 0 or not shutil.which("ffmpeg"):
+        return None
+    src = _excerpt_source(work_dir, analyzed_wav)
+    out = os.path.join(work_dir, "excerpt.mp3")
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", src, "-t", str(EXCERPT_SECS),
+             "-ac", "1", "-ar", "32000", "-b:a", "64k", out],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
+        )
+        size = os.path.getsize(out)
+        if not size or size > 3 * 1024 * 1024:  # sanity: never ship a >3MB blob
+            return None
+        import base64  # noqa: PLC0415
+        with open(out, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+        span = min(float(EXCERPT_SECS), dur) if dur else float(EXCERPT_SECS)
+        return {"b64": b64, "format": "mp3", "durationSec": round(span, 1)}
+    except Exception as e:  # noqa: BLE001 — the excerpt is an upgrade, never a dependency
+        print(f"[worker] excerpt encode failed: {e}", flush=True)
+        return None
+
+
 BUSY = object()  # sentinel: shed for load, distinct from "couldn't analyze"
 
 
@@ -521,6 +592,14 @@ def analyze_url(url: str, deep: bool = False):
         wf = _report_waveform(work_dir, rec.get("id"))
         if wf:
             feat["waveform"] = wf
+        # Score engine v2 inputs: crest factor (dynamics honesty) + the opening
+        # excerpt for the audio-LLM listen pass. Both optional upgrades.
+        crest = _crest_db(wav, (rec.get("efeat") or {}).get("rmsdb"))
+        if crest is not None:
+            feat["crestDb"] = crest
+        ex = _encode_excerpt(work_dir, wav, feat.get("durationSec"))
+        if ex:
+            feat["excerpt"] = ex
         return feat
     except Exception as e:  # noqa: BLE001
         print(f"[worker] analysis failed for {url}: {e}", flush=True)
@@ -564,7 +643,7 @@ def make_handler(token: str | None):
                         stem_backend = "local-demucs" if getattr(stems, "HAVE_DEMUCS", False) else "replicate"
                 except Exception:  # noqa: BLE001
                     pass
-                self._json({"ok": True, "worker": "djmix", "stems": stems_on, "stemBackend": stem_backend, "ytCookies": _cookie_file() is not None, "proxy": bool(os.environ.get("YTDLP_PROXY")), "rev": "slot-free-stems-1"})
+                self._json({"ok": True, "worker": "djmix", "stems": stems_on, "stemBackend": stem_backend, "ytCookies": _cookie_file() is not None, "proxy": bool(os.environ.get("YTDLP_PROXY")), "rev": "excerpt-crest-1", "excerptSecs": EXCERPT_SECS})
                 return
             self._json({"error": "not found"}, 404)
 
