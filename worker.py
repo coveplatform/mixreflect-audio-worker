@@ -62,6 +62,19 @@ DOWNLOAD_TIMEOUT = 45  # seconds for the network fetch
 # Only analyse the first N seconds — the analysis arrays scale with duration, and
 # this keeps peak memory inside a small (512 MB) box. Plenty to score a track.
 MAX_ANALYZE_SECS = int(os.environ.get("MAX_ANALYZE_SECS", "210"))
+# Product cap: refuse sources longer than this outright (DJ sets, podcasts,
+# full albums) instead of scoring a partial read of something that isn't a
+# single track. 0 disables. Rejection rides back as {tooLong: true} so the app
+# can tell the artist honestly rather than falling back to a metadata score.
+MAX_SOURCE_SECS = int(os.environ.get("MAX_SOURCE_SECS", "780"))
+
+
+class TooLong(Exception):
+    """Source duration exceeds MAX_SOURCE_SECS — a product cap, not a failure."""
+
+    def __init__(self, duration: float):
+        super().__init__(f"source runs {duration:.0f}s (cap {MAX_SOURCE_SECS}s)")
+        self.duration = duration
 # Serialize the LOCAL DSP pass so concurrent uploads can't run in parallel and
 # double the memory (→ OOM on a small box). Excess requests wait briefly, then
 # shed load (return no features → caller falls back to a non-grounded read,
@@ -180,6 +193,15 @@ def _fetch_ytdlp(url: str, out_dir: str) -> str | None:
         opts["force_keyframes_at_cuts"] = True
     except Exception:  # noqa: BLE001
         pass
+    # Skip the download entirely for over-cap sources — the metadata duration is
+    # known before any bytes move. The TooLong raise below (off the same
+    # metadata) is what actually reports it; this just saves the bandwidth.
+    if MAX_SOURCE_SECS > 0:
+        try:
+            from yt_dlp.utils import match_filter_func  # noqa: PLC0415
+            opts["match_filter"] = match_filter_func(f"duration <= {MAX_SOURCE_SECS}")
+        except Exception:  # noqa: BLE001
+            pass
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             # extract_info(download=True) == download, but also hands us the
@@ -216,6 +238,8 @@ def _fetch_ytdlp(url: str, out_dir: str) -> str | None:
         src_dur = float(info.get("duration")) if info and info.get("duration") else None
     except Exception:  # noqa: BLE001
         pass
+    if src_dur and MAX_SOURCE_SECS > 0 and src_dur > MAX_SOURCE_SECS:
+        raise TooLong(src_dur)
     for nm in os.listdir(out_dir):
         if nm.lower().endswith(".wav"):
             return os.path.join(out_dir, nm), src_dur
@@ -284,6 +308,8 @@ def acquire_wav(url: str, work_dir: str) -> tuple[str, float | None] | None:
         if not _fetch_direct(url, raw):
             return None
         src_dur = _probe_duration(raw)
+        if src_dur and MAX_SOURCE_SECS > 0 and src_dur > MAX_SOURCE_SECS:
+            raise TooLong(src_dur)
         # Always transcode → caps duration (MAX_ANALYZE_SECS) and normalises to
         # mono 22.05 kHz, so even a long wav/flac upload stays inside memory.
         wav = os.path.join(work_dir, "track.wav")
@@ -629,6 +655,9 @@ def analyze_url(url: str, deep: bool = False):
         elif ex_err:
             feat["excerptError"] = ex_err
         return feat
+    except TooLong as e:
+        print(f"[worker] rejected (too long: {e.duration:.0f}s) {url}", flush=True)
+        return {"_tooLong": round(e.duration, 1)}
     except Exception as e:  # noqa: BLE001
         print(f"[worker] analysis failed for {url}: {e}", flush=True)
         return None
@@ -677,7 +706,7 @@ def make_handler(token: str | None):
                         stem_backend = "local-demucs" if getattr(stems, "HAVE_DEMUCS", False) else "replicate"
                 except Exception:  # noqa: BLE001
                     pass
-                self._json({"ok": True, "worker": "djmix", "stems": stems_on, "stemBackend": stem_backend, "ytCookies": _cookie_file() is not None, "proxy": bool(os.environ.get("YTDLP_PROXY")), "rev": "playlist-first-1", "excerptSecs": EXCERPT_SECS})
+                self._json({"ok": True, "worker": "djmix", "stems": stems_on, "stemBackend": stem_backend, "ytCookies": _cookie_file() is not None, "proxy": bool(os.environ.get("YTDLP_PROXY")), "rev": "max-source-1", "excerptSecs": EXCERPT_SECS, "maxSourceSecs": MAX_SOURCE_SECS})
                 return
             self._json({"error": "not found"}, 404)
 
@@ -709,6 +738,17 @@ def make_handler(token: str | None):
             if features is BUSY:
                 print(f"[worker] busy — shedding {url}", flush=True)
                 self._json({"features": None, "busy": True})
+                return
+            # Product cap, not a failure: the source is too long to be a single
+            # track. Explicit marker so the app can say so instead of silently
+            # falling back to a metadata-only score.
+            if isinstance(features, dict) and "_tooLong" in features:
+                self._json({
+                    "features": None,
+                    "tooLong": True,
+                    "sourceDurationSec": features["_tooLong"],
+                    "took": took,
+                })
                 return
             # Always reply 200 with a `{ features }` envelope: null means "couldn't
             # ground this one" so mixreflect falls back to its non-grounded read
