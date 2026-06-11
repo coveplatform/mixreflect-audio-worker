@@ -1,4 +1,4 @@
-"""djmix audio worker — URL → real DSP features, for mixreflect's score reports.
+﻿"""djmix audio worker â€” URL â†’ real DSP features, for mixreflect's score reports.
 
 mixreflect (`src/lib/audio-analysis.ts`) already knows how to call an external
 analyzer: it POSTs `{ "url": "<track link>" }` to `${AUDIO_WORKER_URL}/analyze`
@@ -6,17 +6,17 @@ with an optional `Authorization: Bearer ${AUDIO_WORKER_SECRET}` and spreads the
 JSON it gets back into its `AudioFeatures` shape. Nothing was filling that hook,
 so the report's "audio-grounded" read was running blind.
 
-This service fills it. It reuses the djmix analysis core (`analyze.py` — the same
+This service fills it. It reuses the djmix analysis core (`analyze.py` â€” the same
 BPM / key / energy / spectral / structure engine the DJ tool uses) but fronts it
 with a downloader so it works on a *link* instead of a local file:
 
-    1. direct audio link (.mp3/.wav/.flac/.m4a/.ogg) → downloaded directly
-    2. SoundCloud / YouTube / Bandcamp / etc.        → yt-dlp
-    …then ffmpeg transcodes whatever came down to a mono wav that libsndfile can
+    1. direct audio link (.mp3/.wav/.flac/.m4a/.ogg) â†’ downloaded directly
+    2. SoundCloud / YouTube / Bandcamp / etc.        â†’ yt-dlp
+    â€¦then ffmpeg transcodes whatever came down to a mono wav that libsndfile can
     read, `analyze.analyze_file` measures it, and `to_audio_features` maps the
     rich djmix record onto mixreflect's `AudioFeatures` contract.
 
-Audio is fetched to a temp dir and deleted right after analysis — only the
+Audio is fetched to a temp dir and deleted right after analysis â€” only the
 derived numbers (tempo, key, energy, the section/energy arc) are returned.
 
 Run it:
@@ -50,22 +50,22 @@ from urllib.request import Request, urlopen
 import analyze  # the shared DSP core (BPM/key/energy/spectral/structure)
 
 # Stem separation (demucs/torch) reads real verse/chorus/drop structure even on
-# loud, consistently-mastered tracks — where the loudness-based detector collapses
+# loud, consistently-mastered tracks â€” where the loudness-based detector collapses
 # the whole song into one flat section and makes polished hits look monotonous.
 # Heavy: needs torch + demucs installed (ideally a GPU box). Set DJMIX_STEMS=0 to
 # force it off and fall back to the lighter loudness structure.
 os.environ.setdefault("DJMIX_STEMS", "1")
 
 DIRECT_AUDIO_EXT = (".mp3", ".wav", ".flac", ".aiff", ".aif", ".ogg", ".m4a", ".opus")
-MAX_DOWNLOAD_BYTES = 60 * 1024 * 1024  # 60 MB cap — a single track, not an album rip
+MAX_DOWNLOAD_BYTES = 60 * 1024 * 1024  # 60 MB cap â€” a single track, not an album rip
 DOWNLOAD_TIMEOUT = 45  # seconds for the network fetch
-# Only analyse the first N seconds — the analysis arrays scale with duration, and
+# Only analyse the first N seconds â€” the analysis arrays scale with duration, and
 # this keeps peak memory inside a small (512 MB) box. Plenty to score a track.
 MAX_ANALYZE_SECS = int(os.environ.get("MAX_ANALYZE_SECS", "210"))
 # Serialize the LOCAL DSP pass so concurrent uploads can't run in parallel and
-# double the memory (→ OOM on a small box). Excess requests wait briefly, then
-# shed load (return no features → caller falls back to a non-grounded read,
-# never a crash). The slot covers ONLY the memory-heavy local analysis — not the
+# double the memory (â†’ OOM on a small box). Excess requests wait briefly, then
+# shed load (return no features â†’ caller falls back to a non-grounded read,
+# never a crash). The slot covers ONLY the memory-heavy local analysis â€” not the
 # download and not the Replicate stem wait (network-idle), which used to pin it
 # for 2-6 minutes and starve every upload that arrived meanwhile.
 MAX_CONCURRENCY = int(os.environ.get("MAX_CONCURRENCY", "1"))
@@ -77,7 +77,7 @@ _ANALYZE_SEM = threading.BoundedSemaphore(MAX_CONCURRENCY)
 _STEMS_SEM = threading.BoundedSemaphore(1)
 
 
-# ── download ─────────────────────────────────────────────────────────────────
+# â”€â”€ download â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _is_direct_audio(url: str) -> bool:
     return urlparse(url).path.lower().endswith(DIRECT_AUDIO_EXT)
@@ -107,7 +107,7 @@ def _fetch_direct(url: str, dest: str) -> bool:
 _COOKIE_PATH: str | None = None
 
 def _cookie_file() -> str | None:
-    """Resolve a yt-dlp cookies file: base64 env (YTDLP_COOKIES_B64) → temp file,
+    """Resolve a yt-dlp cookies file: base64 env (YTDLP_COOKIES_B64) â†’ temp file,
     or an explicit path (YTDLP_COOKIES_FILE). Cached after first materialisation."""
     global _COOKIE_PATH
     if _COOKIE_PATH and os.path.exists(_COOKIE_PATH):
@@ -135,7 +135,7 @@ def _fetch_ytdlp(url: str, out_dir: str) -> str | None:
     try:
         import yt_dlp  # noqa: PLC0415
     except ImportError:
-        print("[worker] yt-dlp not installed — streaming links unsupported", flush=True)
+        print("[worker] yt-dlp not installed â€” streaming links unsupported", flush=True)
         return None
 
     out_tmpl = os.path.join(out_dir, "src.%(ext)s")
@@ -153,7 +153,7 @@ def _fetch_ytdlp(url: str, out_dir: str) -> str | None:
     }
     # Cookies are the real fix for YouTube bot-walls on cloud IPs (base64 env
     # YTDLP_COOKIES_B64 or a path YTDLP_COOKIES_FILE).
-    # A residential proxy is the real fix for YouTube's datacenter-IP block —
+    # A residential proxy is the real fix for YouTube's datacenter-IP block â€”
     # the IP is the problem, not auth. Set YTDLP_PROXY to a proxy URL.
     proxy = os.environ.get("YTDLP_PROXY")
     if proxy:
@@ -162,7 +162,7 @@ def _fetch_ytdlp(url: str, out_dir: str) -> str | None:
     cookies = _cookie_file()
     if cookies:
         opts["cookiefile"] = cookies
-    # NB: do NOT pin player_client — forcing android/ios excludes the client that
+    # NB: do NOT pin player_client â€” forcing android/ios excludes the client that
     # actually has downloadable formats ("Requested format is not available").
     # yt-dlp keeps its default client selection current; with a residential proxy
     # the defaults download fine.
@@ -176,17 +176,17 @@ def _fetch_ytdlp(url: str, out_dir: str) -> str | None:
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             # extract_info(download=True) == download, but also hands us the
-            # metadata — `duration` is the FULL source length even when
+            # metadata â€” `duration` is the FULL source length even when
             # download_ranges only pulled the first MAX_ANALYZE_SECS.
             info = ydl.extract_info(url, download=True)
     except Exception as e:  # noqa: BLE001
         msg = str(e)
         # Geo-blocked videos surface as "Video unavailable" from the proxy's
         # exit region while playing fine elsewhere (observed live: a region-
-        # locked music video). One retry WITHOUT the proxy — the datacenter IP
+        # locked music video). One retry WITHOUT the proxy â€” the datacenter IP
         # often passes geo even though it needs the proxy for bot-walls.
         if proxy and "unavailable" in msg.lower():
-            print("[worker] unavailable via proxy — retrying direct", flush=True)
+            print("[worker] unavailable via proxy â€” retrying direct", flush=True)
             opts.pop("proxy", None)
             try:
                 with yt_dlp.YoutubeDL(opts) as ydl:
@@ -210,7 +210,7 @@ def _fetch_ytdlp(url: str, out_dir: str) -> str | None:
 
 
 def _soundfile_readable(path: str) -> bool:
-    """True if libsndfile can open it directly (wav/flac/ogg/aiff) — then we can
+    """True if libsndfile can open it directly (wav/flac/ogg/aiff) â€” then we can
     skip the ffmpeg transcode entirely."""
     try:
         import soundfile as sf  # noqa: PLC0415
@@ -221,12 +221,12 @@ def _soundfile_readable(path: str) -> bool:
 
 
 def _transcode_to_wav(src: str, dest: str) -> bool:
-    """ffmpeg → mono 16 kHz wav. Everything the analysis measures (bands split
+    """ffmpeg â†’ mono 16 kHz wav. Everything the analysis measures (bands split
     at 160 Hz / 2 kHz, tempo, key, structure) lives comfortably under the 8 kHz
-    Nyquist, and vs 22.05 kHz it's ~27% fewer samples through every FFT — less
+    Nyquist, and vs 22.05 kHz it's ~27% fewer samples through every FFT â€” less
     memory AND less CPU on the small box."""
     if not shutil.which("ffmpeg"):
-        print("[worker] ffmpeg not on PATH — cannot transcode", flush=True)
+        print("[worker] ffmpeg not on PATH â€” cannot transcode", flush=True)
         return False
     try:
         subprocess.run(
@@ -259,7 +259,7 @@ def _probe_duration(path: str) -> float | None:
 
 
 def acquire_wav(url: str, work_dir: str) -> tuple[str, float | None] | None:
-    """Get a libsndfile-readable wav for `url` → (path, source duration secs or
+    """Get a libsndfile-readable wav for `url` â†’ (path, source duration secs or
     None). The wav is capped at MAX_ANALYZE_SECS; the duration is the FULL
     source length when we can know it, so the app can tell a truncated read."""
     scheme = urlparse(url).scheme.lower()
@@ -271,7 +271,7 @@ def acquire_wav(url: str, work_dir: str) -> tuple[str, float | None] | None:
         if not _fetch_direct(url, raw):
             return None
         src_dur = _probe_duration(raw)
-        # Always transcode → caps duration (MAX_ANALYZE_SECS) and normalises to
+        # Always transcode â†’ caps duration (MAX_ANALYZE_SECS) and normalises to
         # mono 22.05 kHz, so even a long wav/flac upload stays inside memory.
         wav = os.path.join(work_dir, "track.wav")
         if _transcode_to_wav(raw, wav):
@@ -279,7 +279,7 @@ def acquire_wav(url: str, work_dir: str) -> tuple[str, float | None] | None:
         # Fallback: ffmpeg couldn't handle it but libsndfile might (uncapped).
         return (raw, src_dur) if _soundfile_readable(raw) else None
 
-    # streaming site → yt-dlp produces a FULL-quality wav (48 kHz stereo, ~40 MB);
+    # streaming site â†’ yt-dlp produces a FULL-quality wav (48 kHz stereo, ~40 MB);
     # transcode it down to mono 22.05 kHz too, or analyze.py OOMs the small box.
     yt = _fetch_ytdlp(url, work_dir)
     if not yt:
@@ -289,10 +289,10 @@ def acquire_wav(url: str, work_dir: str) -> tuple[str, float | None] | None:
     return (small, src_dur) if _transcode_to_wav(yt_path, small) else (yt_path, src_dur)
 
 
-# ── map djmix record → mixreflect AudioFeatures ──────────────────────────────
+# â”€â”€ map djmix record â†’ mixreflect AudioFeatures â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _format_key(k: str | None) -> str | None:
-    """'F#m' → 'F# minor', 'F#' → 'F# major', '' → None."""
+    """'F#m' â†’ 'F# minor', 'F#' â†’ 'F# major', '' â†’ None."""
     if not k:
         return None
     k = k.strip()
@@ -395,7 +395,7 @@ def to_audio_features(rec: dict) -> dict:
     energy_norm = round(energy_1_10 / 10.0, 3) if energy_1_10 else None
     spectral = _derive_spectral(efeat)
 
-    # Per-stem balance — only present when the demucs/Replicate stem pass ran (deep
+    # Per-stem balance â€” only present when the demucs/Replicate stem pass ran (deep
     # reads). Lets the model say "the vocal sits under the guitars", not guess.
     stems_used = structure.get("structureSource") == "demucs"
     stem_mix = None
@@ -419,7 +419,7 @@ def to_audio_features(rec: dict) -> dict:
         "durationSec": rec.get("duration"),
         "tempo": rec.get("bpm"),
         "key": _format_key(rec.get("key")),
-        # RMS dBFS — not a true integrated LUFS, but the right ballpark to feed the
+        # RMS dBFS â€” not a true integrated LUFS, but the right ballpark to feed the
         # model (the Spotify path feeds its `loudness` the same way).
         "loudnessLufs": efeat.get("rmsdb"),
         "energy": energy_norm,
@@ -441,7 +441,7 @@ def to_audio_features(rec: dict) -> dict:
 def _report_waveform(cache_dir: str, tid: str, cols: int = 1200) -> dict | None:
     """Compact 3-band waveform for the report page. analyze_file already computes
     the full-res rekordbox-style detail block (per-column LOW/MID/HIGH peaks +
-    RMS body) and writes it to <cache>/wave/<id>.json — this max-pools it down to
+    RMS body) and writes it to <cache>/wave/<id>.json â€” this max-pools it down to
     ~`cols` columns (a few KB of base64) so the report can draw a real frequency-
     split waveform. Max (not mean) pooling keeps the kicks/transients crisp."""
     try:
@@ -468,12 +468,12 @@ def _report_waveform(cache_dir: str, tid: str, cols: int = 1200) -> dict | None:
             "hi": pool(detail["hi"]),
             "amp": pool(detail["amp"]),
         }
-    except Exception as e:  # noqa: BLE001 — waveform is decorative; never fail the read
+    except Exception as e:  # noqa: BLE001 â€” waveform is decorative; never fail the read
         print(f"[worker] report waveform failed: {e}", flush=True)
         return None
 
 
-# ── listen-pass excerpt + crest factor (score engine v2) ─────────────────────
+# â”€â”€ listen-pass excerpt + crest factor (score engine v2) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 # Opening excerpt (base64 mp3) handed to the app's audio-LLM listen pass. Mono
 # 32 kHz @ 64 kbps keeps 90s around ~700 KB raw / ~1 MB base64. 0 disables.
@@ -481,7 +481,7 @@ EXCERPT_SECS = int(os.environ.get("EXCERPT_SECS", "90"))
 
 
 def _peak_db(path: str) -> float | None:
-    """True sample peak (dBFS), chunked read — never loads the file whole."""
+    """True sample peak (dBFS), chunked read â€” never loads the file whole."""
     try:
         import soundfile as sf  # noqa: PLC0415
         peak = 0.0
@@ -500,7 +500,7 @@ def _peak_db(path: str) -> float | None:
 
 
 def _crest_db(wav_path: str, rmsdb) -> float | None:
-    """Crest factor = peak − RMS (dB). Low = squashed master, high = dynamic
+    """Crest factor = peak âˆ’ RMS (dB). Low = squashed master, high = dynamic
     (or an unmastered-quiet bounce). RMS comes from the analysis (efeat.rmsdb)."""
     if rmsdb is None:
         return None
@@ -512,50 +512,61 @@ def _crest_db(wav_path: str, rmsdb) -> float | None:
 
 def _excerpt_source(work_dir: str, analyzed_wav: str) -> str:
     """Best audio to excerpt from: the pre-16kHz download (full bandwidth) when
-    it's still in the work dir, else the analysed wav (8 kHz ceiling — usable)."""
+    it's still in the work dir, else the analysed wav (8 kHz ceiling â€” usable)."""
     for nm in os.listdir(work_dir):
         if nm == "raw_input" or (nm.startswith("src.") and not nm.endswith(".part")):
             return os.path.join(work_dir, nm)
     return analyzed_wav
 
 
-def _encode_excerpt(work_dir: str, analyzed_wav: str, dur: float | None) -> dict | None:
-    """ffmpeg → mono 32 kHz 64 kbps mp3 of the opening EXCERPT_SECS, base64."""
-    if EXCERPT_SECS <= 0 or not shutil.which("ffmpeg"):
-        return None
+def _encode_excerpt(
+    work_dir: str, analyzed_wav: str, dur: float | None
+) -> tuple[dict | None, str | None]:
+    """ffmpeg â†’ mono 32 kHz 64 kbps mp3 of the opening EXCERPT_SECS, base64.
+    Returns (excerpt, error) â€” the error string rides back in the response so a
+    silent encode failure on the deployed box is diagnosable from outside."""
+    if EXCERPT_SECS <= 0:
+        return None, "disabled"
+    if not shutil.which("ffmpeg"):
+        return None, "no-ffmpeg"
     src = _excerpt_source(work_dir, analyzed_wav)
     out = os.path.join(work_dir, "excerpt.mp3")
     try:
-        subprocess.run(
+        proc = subprocess.run(
             ["ffmpeg", "-y", "-i", src, "-t", str(EXCERPT_SECS),
              "-ac", "1", "-ar", "32000", "-b:a", "64k", out],
-            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=60,
         )
+        if proc.returncode != 0:
+            tail = (proc.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+            err = f"ffmpeg exit {proc.returncode}: {tail[-1][:200] if tail else 'no stderr'}"
+            print(f"[worker] excerpt encode failed ({src}): {err}", flush=True)
+            return None, err
         size = os.path.getsize(out)
         if not size or size > 3 * 1024 * 1024:  # sanity: never ship a >3MB blob
-            return None
+            return None, f"bad size {size}"
         import base64  # noqa: PLC0415
         with open(out, "rb") as f:
             b64 = base64.b64encode(f.read()).decode("ascii")
         span = min(float(EXCERPT_SECS), dur) if dur else float(EXCERPT_SECS)
-        return {"b64": b64, "format": "mp3", "durationSec": round(span, 1)}
-    except Exception as e:  # noqa: BLE001 — the excerpt is an upgrade, never a dependency
-        print(f"[worker] excerpt encode failed: {e}", flush=True)
-        return None
+        return {"b64": b64, "format": "mp3", "durationSec": round(span, 1)}, None
+    except Exception as e:  # noqa: BLE001 â€” the excerpt is an upgrade, never a dependency
+        print(f"[worker] excerpt encode failed ({src}): {e}", flush=True)
+        return None, str(e)[:200]
 
 
 BUSY = object()  # sentinel: shed for load, distinct from "couldn't analyze"
 
 
 def analyze_url(url: str, deep: bool = False):
-    """Full pipeline: download → transcode → analyze → map. None on any failure;
+    """Full pipeline: download â†’ transcode â†’ analyze â†’ map. None on any failure;
     the BUSY sentinel when the local-DSP slot couldn't be acquired in time.
 
     `deep=True` adds the stem-separation pass (drums/bass/vocals/other structure
     + per-stem balance) AFTER the quick pass, outside the analysis slot:
     `analyze_file(quick=True)` used to keep every big DSP array alive in its
     frame while stems ran (and on Replicate, while a 2-6 min prediction queued)
-    — OOM-killing the box AND starving concurrent uploads. Now the quick pass
+    â€” OOM-killing the box AND starving concurrent uploads. Now the quick pass
     finishes and frees its arrays first, then `deepen_structure` upgrades the
     sectioning from the wav on disk. cache_dir = throwaway temp dir."""
     work_dir = tempfile.mkdtemp(prefix="djmix-worker-")
@@ -564,7 +575,7 @@ def analyze_url(url: str, deep: bool = False):
         if not acquired or not os.path.exists(acquired[0]):
             return None
         wav, src_dur = acquired
-        # The memory-heavy phase — one at a time on the small box.
+        # The memory-heavy phase â€” one at a time on the small box.
         if not _ANALYZE_SEM.acquire(timeout=QUEUE_WAIT_SECS):
             return BUSY
         try:
@@ -581,7 +592,7 @@ def analyze_url(url: str, deep: bool = False):
                 finally:
                     _STEMS_SEM.release()
             else:
-                print(f"[worker] stems busy — loudness structure for {url}", flush=True)
+                print(f"[worker] stems busy â€” loudness structure for {url}", flush=True)
         feat = to_audio_features(rec)
         # When the analysis window (MAX_ANALYZE_SECS) truncated a longer track,
         # report the real source length so the read never claims an ending it
@@ -597,9 +608,11 @@ def analyze_url(url: str, deep: bool = False):
         crest = _crest_db(wav, (rec.get("efeat") or {}).get("rmsdb"))
         if crest is not None:
             feat["crestDb"] = crest
-        ex = _encode_excerpt(work_dir, wav, feat.get("durationSec"))
+        ex, ex_err = _encode_excerpt(work_dir, wav, feat.get("durationSec"))
         if ex:
             feat["excerpt"] = ex
+        elif ex_err:
+            feat["excerptError"] = ex_err
         return feat
     except Exception as e:  # noqa: BLE001
         print(f"[worker] analysis failed for {url}: {e}", flush=True)
@@ -608,7 +621,7 @@ def analyze_url(url: str, deep: bool = False):
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
-# ── HTTP ─────────────────────────────────────────────────────────────────────
+# â”€â”€ HTTP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def make_handler(token: str | None):
     class Handler(BaseHTTPRequestHandler):
@@ -627,7 +640,7 @@ def make_handler(token: str | None):
 
         def _authed(self) -> bool:
             if not token:
-                return True  # no secret configured → open (use only on a private network)
+                return True  # no secret configured â†’ open (use only on a private network)
             auth = self.headers.get("Authorization", "")
             given = auth[7:] if auth.startswith("Bearer ") else ""
             return secrets.compare_digest(given, token)
@@ -643,7 +656,7 @@ def make_handler(token: str | None):
                         stem_backend = "local-demucs" if getattr(stems, "HAVE_DEMUCS", False) else "replicate"
                 except Exception:  # noqa: BLE001
                     pass
-                self._json({"ok": True, "worker": "djmix", "stems": stems_on, "stemBackend": stem_backend, "ytCookies": _cookie_file() is not None, "proxy": bool(os.environ.get("YTDLP_PROXY")), "rev": "excerpt-crest-1", "excerptSecs": EXCERPT_SECS})
+                self._json({"ok": True, "worker": "djmix", "stems": stems_on, "stemBackend": stem_backend, "ytCookies": _cookie_file() is not None, "proxy": bool(os.environ.get("YTDLP_PROXY")), "rev": "excerpt-crest-2", "excerptSecs": EXCERPT_SECS})
                 return
             self._json({"error": "not found"}, 404)
 
@@ -673,7 +686,7 @@ def make_handler(token: str | None):
             # Shed for load (local-DSP slot stayed busy past QUEUE_WAIT_SECS):
             # a burst of uploads degrades instead of OOM-crashing the worker.
             if features is BUSY:
-                print(f"[worker] busy — shedding {url}", flush=True)
+                print(f"[worker] busy â€” shedding {url}", flush=True)
                 self._json({"features": None, "busy": True})
                 return
             # Always reply 200 with a `{ features }` envelope: null means "couldn't
@@ -702,17 +715,17 @@ def main():
 
     token = os.environ.get("AUDIO_WORKER_SECRET")
     if not token:
-        print("[worker] WARNING: AUDIO_WORKER_SECRET not set — /analyze is open", flush=True)
+        print("[worker] WARNING: AUDIO_WORKER_SECRET not set â€” /analyze is open", flush=True)
     if not shutil.which("ffmpeg"):
-        print("[worker] WARNING: ffmpeg not found on PATH — analysis will fail", flush=True)
-    print(f"[worker] youtube cookies: {'loaded ✓' if _cookie_file() else 'NOT set (YouTube links may be blocked)'}", flush=True)
+        print("[worker] WARNING: ffmpeg not found on PATH â€” analysis will fail", flush=True)
+    print(f"[worker] youtube cookies: {'loaded âœ“' if _cookie_file() else 'NOT set (YouTube links may be blocked)'}", flush=True)
 
     server = ThreadingHTTPServer((args.host, args.port), make_handler(token))
-    print(f"djmix worker — listening on http://{args.host}:{args.port}", flush=True)
+    print(f"djmix worker â€” listening on http://{args.host}:{args.port}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nstopping…")
+        print("\nstoppingâ€¦")
         server.shutdown()
 
 
