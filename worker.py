@@ -145,6 +145,13 @@ def _fetch_ytdlp(url: str, out_dir: str) -> str | None:
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
+        # `noplaylist` only disambiguates video+playlist URLs — a PURE playlist
+        # link (SoundCloud /sets/, YouTube /playlist) still downloads EVERY
+        # entry, grinding past the app's analyze budget into an ungrounded read
+        # (observed live: a /sets/ single took >150s and got aborted). Cap at
+        # the first entry — for SoundCloud "singles" shared as a set, that IS
+        # the track.
+        "playlist_items": "1",
         "max_filesize": MAX_DOWNLOAD_BYTES,
         "socket_timeout": DOWNLOAD_TIMEOUT,
         "postprocessors": [
@@ -200,6 +207,12 @@ def _fetch_ytdlp(url: str, out_dir: str) -> str | None:
 
     src_dur = None
     try:
+        # Playlist URL → the duration lives on the (single, see playlist_items)
+        # downloaded entry, not the playlist wrapper.
+        if info and info.get("entries"):
+            entries = [e for e in info["entries"] if e]
+            if entries:
+                info = entries[0]
         src_dur = float(info.get("duration")) if info and info.get("duration") else None
     except Exception:  # noqa: BLE001
         pass
@@ -634,11 +647,17 @@ def make_handler(token: str | None):
 
         def _json(self, obj, code=200):
             body = json.dumps(obj).encode("utf-8")
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                # The app's analyze budget aborted the request while we were
+                # still working — the result is lost either way; log one line
+                # instead of spraying a socketserver traceback per occurrence.
+                print("[worker] client disconnected before response", flush=True)
 
         def _authed(self) -> bool:
             if not token:
@@ -658,7 +677,7 @@ def make_handler(token: str | None):
                         stem_backend = "local-demucs" if getattr(stems, "HAVE_DEMUCS", False) else "replicate"
                 except Exception:  # noqa: BLE001
                     pass
-                self._json({"ok": True, "worker": "djmix", "stems": stems_on, "stemBackend": stem_backend, "ytCookies": _cookie_file() is not None, "proxy": bool(os.environ.get("YTDLP_PROXY")), "rev": "excerpt-crest-3", "excerptSecs": EXCERPT_SECS})
+                self._json({"ok": True, "worker": "djmix", "stems": stems_on, "stemBackend": stem_backend, "ytCookies": _cookie_file() is not None, "proxy": bool(os.environ.get("YTDLP_PROXY")), "rev": "playlist-first-1", "excerptSecs": EXCERPT_SECS})
                 return
             self._json({"error": "not found"}, 404)
 
