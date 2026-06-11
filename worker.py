@@ -532,8 +532,10 @@ def _encode_excerpt(
     src = _excerpt_source(work_dir, analyzed_wav)
     out = os.path.join(work_dir, "excerpt.mp3")
     try:
+        # -vn: drop embedded album art — without it the cover JPEG gets muxed
+        # into the excerpt (observed: a 720KB/90s encode bloated past 3MB).
         proc = subprocess.run(
-            ["ffmpeg", "-y", "-i", src, "-t", str(EXCERPT_SECS),
+            ["ffmpeg", "-y", "-i", src, "-t", str(EXCERPT_SECS), "-vn",
              "-ac", "1", "-ar", "32000", "-b:a", "64k", out],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=60,
         )
@@ -656,7 +658,7 @@ def make_handler(token: str | None):
                         stem_backend = "local-demucs" if getattr(stems, "HAVE_DEMUCS", False) else "replicate"
                 except Exception:  # noqa: BLE001
                     pass
-                self._json({"ok": True, "worker": "djmix", "stems": stems_on, "stemBackend": stem_backend, "ytCookies": _cookie_file() is not None, "proxy": bool(os.environ.get("YTDLP_PROXY")), "rev": "excerpt-crest-2", "excerptSecs": EXCERPT_SECS})
+                self._json({"ok": True, "worker": "djmix", "stems": stems_on, "stemBackend": stem_backend, "ytCookies": _cookie_file() is not None, "proxy": bool(os.environ.get("YTDLP_PROXY")), "rev": "excerpt-crest-3", "excerptSecs": EXCERPT_SECS})
                 return
             self._json({"error": "not found"}, 404)
 
